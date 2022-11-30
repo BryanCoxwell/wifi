@@ -1,5 +1,7 @@
 package wifi
 
+import "fmt"
+
 // A Client is a type which can access WiFi device actions and statistics
 // using operating system-specific operations.
 type Client struct {
@@ -43,6 +45,12 @@ func (c *Client) Interfaces() ([]*Interface, error) {
 	return c.c.Interfaces()
 }
 
+// InterfaceByName calls Interfaces() and returns one interface or nil 
+// if the requested interface doesn't exist.
+func (c *Client) InterfaceByName(name string) (*Interface, error) {
+	return c.c.InterfaceByName(name)
+}
+
 // BSS retrieves the BSS associated with a WiFi interface.
 func (c *Client) BSS(ifi *Interface) (*BSS, error) {
 	return c.c.BSS(ifi)
@@ -51,4 +59,20 @@ func (c *Client) BSS(ifi *Interface) (*BSS, error) {
 // StationInfo retrieves all station statistics about a WiFi interface.
 func (c *Client) StationInfo(ifi *Interface) ([]*StationInfo, error) {
 	return c.c.StationInfo(ifi)
+}
+
+// SetFrequency sets the frequency of a wireless interface.
+func (c *Client) SetFrequency(ifi *Interface, freq int) error {
+	return c.c.SetFrequency(ifi, freq)
+}
+
+//SetModeMonitor sets a wireless interface iftype to MONITOR.
+func (c *Client) SetModeMonitor(ifi *Interface) error {
+	fmt.Printf("Setting monitor mode on interface %v\n", ifi)
+	return c.c.SetModeMonitor(ifi)
+}
+
+//SetModeStation sets a wireless interface iftype to Station.
+func (c *Client) SetModeStation(ifi *Interface) error {
+	return c.c.SetModeStation(ifi)
 }

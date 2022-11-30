@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 	"unicode/utf8"
-
+	
 	"github.com/mdlayher/genetlink"
 	"github.com/mdlayher/netlink"
 	"github.com/mdlayher/netlink/nlenc"
@@ -83,6 +83,18 @@ func (c *client) Interfaces() ([]*Interface, error) {
 	}
 
 	return parseInterfaces(msgs)
+}
+
+// InterfaceByName calls Interfaces() and returns one interface or nil 
+// if the requested interface doesn't exist. 
+func (c *client) InterfaceByName(name string) (*Interface, error) {
+	interfaces, err := c.Interfaces()
+	if err != nil { return nil, err }
+
+	for _, i := range interfaces {
+		if i.Name == name { return i, nil }
+	}
+	return nil, nil
 }
 
 // Connect starts connecting the interface to the specified ssid.
@@ -196,6 +208,71 @@ func (c *client) StationInfo(ifi *Interface) ([]*StationInfo, error) {
 	}
 
 	return stations, nil
+}
+
+// SetFrequency sets the frequency of a wireless interface.
+// Does nothing if frequency is already passed in value.
+func (c *client) SetFrequency(ifi *Interface, freq int) error {
+	if ifi.Frequency == freq { return nil }
+	_, err := c.get(
+		unix.NL80211_CMD_SET_WIPHY,
+		netlink.Acknowledge,
+		ifi,
+		func(ae *netlink.AttributeEncoder) {
+			ae.Int32(unix.NL80211_ATTR_WIPHY_FREQ, int32(freq))
+		},
+	)
+	if err == nil { ifi.Frequency = freq }
+	return err
+}
+
+// SetChannelWidth sets the channel of a wireless interface.
+func (c *client) SetChannelWidth(ifi *Interface, width int) error {
+	_, err := c.get(
+		unix.NL80211_CMD_SET_WIPHY,
+		netlink.Acknowledge,
+		ifi,
+		func(ae *netlink.AttributeEncoder) {
+			ae.Int32(unix.NL80211_ATTR_CHANNEL_WIDTH, int32(width))	
+		},
+	)
+	return err
+}
+
+// SetModeMonitor sets the interface iftype to InterfaceTypeMonitor.
+// Does nothing if interface type is already InterfaceTypeMonitor.
+func (c *client) SetModeMonitor(ifi *Interface) error {
+	if ifi.Type == InterfaceTypeMonitor { return nil }
+	_, err := c.setInterface(ifi, InterfaceTypeMonitor)
+	return err
+}
+
+// SetModeStation sets the interface iftype to InterfaceTypeStation.
+// Does nothing if the interface type is already InterfaceTypeStation.
+func (c *client) SetModeStation(ifi *Interface) error {
+	if ifi.Type == InterfaceTypeStation { return nil }
+	_, err := c.setInterface(ifi, InterfaceTypeStation)
+	return err
+}
+
+// setInterface sets the interface iftype
+func (c *client) setInterface(ifi *Interface, iftype InterfaceType) ([]genetlink.Message, error) {
+	msgs, err := c.get(
+		unix.NL80211_CMD_SET_INTERFACE,
+		netlink.Acknowledge,
+		ifi,
+		func(ae *netlink.AttributeEncoder) {
+			ae.Int32(unix.NL80211_ATTR_IFTYPE, int32(iftype))
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	ifi.Type = iftype
+	if len(msgs) == 0 {
+		return nil, os.ErrNotExist
+	}
+	return msgs, nil	
 }
 
 // get performs a request/response interaction with nl80211.
