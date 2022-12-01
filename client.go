@@ -32,7 +32,7 @@ func (c *Client) String() string {
 	return fmt.Sprintf("Netlink connection: %v\nFamilyID: %v\nFamilyVersion: %v\n", c.c, c.familyID, c.familyVersion)
 }
 
-// newClient dials a generic netlink connection and verifies that nl80211
+// NewClient dials a generic netlink connection and verifies that nl80211
 // is available for use by this package.
 func NewClient() (*Client, error) {
 	c, err := genetlink.Dial(nil)
