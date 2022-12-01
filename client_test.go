@@ -352,7 +352,7 @@ func TestLinux_initClientErrorCloseConn(t *testing.T) {
 
 const familyID = 26
 
-func testClient(t *testing.T, fn genltest.Func) *client {
+func testClient(t *testing.T, fn genltest.Func) *Client {
 	family := genetlink.Family{
 		ID:      familyID,
 		Name:    unix.NL80211_GENL_NAME,

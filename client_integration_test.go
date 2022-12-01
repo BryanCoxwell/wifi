@@ -91,7 +91,7 @@ func execN(t *testing.T, n int, expect []string) {
 func testClient(t *testing.T) *wifi.Client {
 	t.Helper()
 
-	c, err := wifi.New()
+	c, err := wifi.NewClient()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			t.Skipf("skipping, nl80211 not found: %v", err)
