@@ -4,14 +4,12 @@
 package wifi
 
 import (
-	"crypto/sha1"
 	"fmt"
 	"net"
-	"os"
 
 	"github.com/mdlayher/genetlink"
 	"github.com/mdlayher/netlink"
-	"golang.org/x/crypto/pbkdf2"
+	"github.com/mdlayher/netlink/nlenc"
 	"golang.org/x/sys/unix"
 )
 
@@ -21,236 +19,154 @@ import (
 type Client struct {
 	c             *genetlink.Conn
 	familyID      uint16
-	familyVersion uint8
+	err 		  error 
 }
 
 // NewClient dials a generic netlink connection and verifies that nl80211
 // is available for use by this package.
 func NewClient() (*Client, error) {
 	c, err := genetlink.Dial(nil)
-	if err != nil {
-		return nil, fmt.Errorf("NewClient: failed to create generic netlink connection: %v", err)
-	}
-
-	// Make a best effort to apply the strict options set to provide better
-	// errors and validation. We don't apply Strict in the constructor because
-	// this library is widely used on a range of kernels and we can't guarantee
-	// it will always work on older kernels.
-	// for _, o := range []netlink.ConnOption{
-	// 	netlink.ExtendedAcknowledge,
-	// 	netlink.GetStrictCheck,
-	// } {
-	// 	_ = c.SetOption(o, true)
-	// }
+	if err != nil { return nil, fmt.Errorf("failed to open generic netlink connection: %v", err )}
+	
 	family, err := c.GetFamily(unix.NL80211_GENL_NAME)
 	if err != nil {
 		c.Close()
-		return nil, fmt.Errorf("initClient: failed to get nl80211 family id: %v", err)
+		return nil, fmt.Errorf("failed to get nl80211 netlink family ID: %v", err)
 	}
-	return &Client {
-		c:				c,
-		familyID:   	family.ID,
-		familyVersion: 	family.Version,
-	}, nil
+	return &Client { c: c, familyID: family.ID }, nil
 }
 
 // Close closes the client's generic netlink connection.
 func (c *Client) Close() error { return c.c.Close() }
 
-// Interfaces requests that nl80211 return a list of all WiFi interfaces present
-// on this system.
-func (c *Client) Interfaces() ([]*WifiInterface, error) {
-	msgs, err := c.get(
-		unix.NL80211_CMD_GET_INTERFACE,
-		netlink.Dump,
-		nil,
-		nil,
-	)
-	if err != nil { return nil, fmt.Errorf("Interfaces: failed to get interfaces: %v", err) }
-
-	interfaceWlanConfigs, err := parseGetInterfaceResponse(msgs)
-	if err != nil { return nil, fmt.Errorf("Interfaces: failed to parse response messages: %v", err )}
-	
-	wifis := make([]*WifiInterface, len(interfaceWlanConfigs))
-	for idx, i := range interfaceWlanConfigs {
-		net_ifi, err := net.InterfaceByIndex(i.Index)
-		if err != nil { return nil, fmt.Errorf("Interfaces: failed to find interface with index %v: %v", i.Index, err)}
-		wifis[idx] = (*WifiInterface)(net_ifi)
-	}
-	return wifis, nil
-}
-
-// InterfaceByName calls Interfaces() and returns one interface or nil 
-// if the requested interface doesn't exist. 
-func (c *Client) InterfaceByName(name string) (*WifiInterface, error) {
-	interfaces, err := c.Interfaces()
-
-	if err != nil { return nil, fmt.Errorf("InterfaceByName: %w", err) }
-	for _, i := range interfaces {
-		if i.Name == name { return i, nil }
-	}
-	return nil, nil
-}
-
-// Connect starts connecting the interface to the specified ssid.
-// Pass an empty string to psk to connect to an open network.
-func (c *Client) Connect(w *WifiInterface, ssid, psk string) error {
-	_, err := c.get(
-		unix.NL80211_CMD_CONNECT,
-		0,
-		w,
-		connectionAttrEncoder(ssid, psk),
-	)
-	return err
-}
-
-// Disconnect disconnects the interface.
-func (c *Client) Disconnect(w *WifiInterface) error {
-	_, err := c.get(
-		unix.NL80211_CMD_DISCONNECT,
-		0,
-		w,
-		nil,
-	)
-	return err
-}
-
-// BSS requests that nl80211 return the BSS for the specified Interface.
-func (c *Client) BSS(w *WifiInterface) (*BSS, error) {
-	msgs, err := c.get(
-		unix.NL80211_CMD_GET_SCAN,
-		netlink.Dump,
-		w,
-		hardwareAddrEncoder(w.HardwareAddr),
-	)
-	if err != nil { return nil, fmt.Errorf("BSS: failed to get the BSS for interface %v: %v", w.Name, err) }
-	return parseBSS(msgs)
-}
-
-// StationInfo requests that nl80211 return all station info for the specified
-// Interface.
-func (c *Client) StationInfo(w *WifiInterface) ([]*StationInfo, error) {
-	msgs, err := c.get(
-		unix.NL80211_CMD_GET_STATION,
-		netlink.Dump,
-		w,
-		hardwareAddrEncoder(w.HardwareAddr),
-	)
-	if err != nil { return nil, err }
-	if len(msgs) == 0 { return nil, os.ErrNotExist }
-	stations := make([]*StationInfo, len(msgs))
-	for i := range msgs {
-		if stations[i], err = parseStationInfo(msgs[i].Data); err != nil {
-			return nil, err
-		}
-	}
-	return stations, nil
-}
-
-// SetFrequency sets the frequency of a wireless interface.
-// Does nothing if frequency is already passed in value.
-func (c *Client) SetFrequency(w *WifiInterface, freq int) error {
-	_, err := c.get(
-		unix.NL80211_CMD_SET_WIPHY,
-		netlink.Acknowledge,	
-		w,
-		wiphyFreqEncoder(freq),
-	)
-	return err
-}
-
-// SetChannelWidth sets the channel of a wireless interface.
-func (c *Client) SetChannelWidth(w *WifiInterface, width int) error {
-	_, err := c.get(
-		unix.NL80211_CMD_SET_WIPHY,
-		0,
-		w,
-		channelWidthEncoder(width),
-	)
-	return err
-}
-
-// SetInterfaceType sets the WifiInterface's type, eg monitor/station/etc.
-func (c *Client) SetInterfaceType(w *WifiInterface, iftype InterfaceType) error {
-	_, err := c.get(
-		unix.NL80211_CMD_SET_INTERFACE,
-		netlink.Acknowledge,
-		w,
-		iftypeEncoder(iftype),
-	)
-	if err != nil { return fmt.Errorf("SetInterfaceType: %w", err)}
-	return nil	
-}
-
-// InterfaceWlanConfig returns an interfaceWlanConfig object for a given interface
-func (c *Client) InterfaceWlanConfig(w *WifiInterface) (*InterfaceWlanConfig, error) {
-	msgs, err := c.get(
-		unix.NL80211_CMD_GET_INTERFACE,
-		0,
-		w,
-		ifindexEncoder(w.Index),
-	)
-	if err != nil { return nil, fmt.Errorf("InterfaceWlanConfig: failed to get interface with index %v: %v", w.Index, err) }
-
-	wlan_configs, err := parseGetInterfaceResponse(msgs)	
-	if err != nil { return nil, fmt.Errorf("InterfaceWlanConfig: failed to parse response messages: %v", err)}
-	
-	return wlan_configs[0], nil
-}
-
-// InterfaceFrequency returns the frequency of the given interface
-func (c *Client) InterfaceFrequency(w *WifiInterface) (int, error) {
-	config, err := c.InterfaceWlanConfig(w)
-	if err != nil { return -1, fmt.Errorf("InterfaceFrequency: %w", err)}
-	return config.Frequency, nil
-}
-
-// InterfaceType returns the type of the given interface
-func (c *Client) InterfaceType(w *WifiInterface) (InterfaceType, error) {
-	config, err := c.InterfaceWlanConfig(w)
-	if err != nil { return -1, fmt.Errorf("InterfaceType: %w", err)}
-	return config.Type, nil
-}
-
-// InterfacePhy returns the PHY index of the given interface
-func (c *Client) InterfacePhy(w *WifiInterface) (int, error) {
-	config, err := c.InterfaceWlanConfig(w)
-	if err != nil { return -1, fmt.Errorf("InterfacePhy: %w", err)}
-	return config.Phy, nil
-}
-
-// get performs a request/response interaction with nl80211.
-func (c *Client) get(
-	cmd uint8,
-	flags netlink.HeaderFlags,
-	w *WifiInterface,
-	// May be nil; used to apply optional parameters.
-	params func(ae *netlink.AttributeEncoder),
-) ([]genetlink.Message, error) {
+// DumpInterfaces returns a list of all wifi interfaces present on the system.
+func (c *Client) DumpInterfaces() ([]*WifiInterface, error) {
+	msg := newGenlMessage(unix.NL80211_CMD_GET_INTERFACE)
 	ae := netlink.NewAttributeEncoder()
-	w.encode(ae)
-	if params != nil {
-		// Optionally apply more parameters to the attribute encoder.
-		params(ae)
-	}
-	b, err := ae.Encode()
-	_, err = c.c.Send(
-		genetlink.Message{
-			Header: genetlink.Header{
-				Command: cmd,
-				Version: c.familyVersion,
-			},
-			Data: b,
-		},
-		// Always pass the genetlink family ID and request flag.
-		c.familyID,
-		netlink.Request|flags,
-	)
-	msgs, _, err := c.c.Receive()
-	return msgs, err
+	flags := netlink.Request | netlink.Dump
+	msg.Data = c.encodeAttributes(ae)
+	c.Send(msg, flags)
+	response := c.Recv()
+	wifis := c.parseGetInterfaceResponse(response)
+	return wifis, c.err
 }
 
-// wpaPassphrase computes a WPA passphrase given an SSID and preshared key.
-func wpaPassphrase(ssid, psk []byte) []byte {
-	return pbkdf2.Key(psk, ssid, 4096, 32, sha1.New)
+// InterfaceById returns the interface that matches the given interface index.
+func (c *Client) InterfaceById(ifindex int) (*WifiInterface, error) {
+	msg := newGenlMessage(unix.NL80211_CMD_GET_INTERFACE)
+	ae := netlink.NewAttributeEncoder()
+	AppendInterfaceIndexAttribute(ifindex, ae)
+	msg.Data = c.encodeAttributes(ae)
+	c.SendRequest(msg)
+	response := c.Recv()
+	wifis := c.parseGetInterfaceResponse(response)
+	if c.err != nil { return nil, c.err }
+	return wifis[0], c.err
+}
+
+// InterfaceByName takes an interface name and returns a pointer to the 
+// corresponding WifiInterface
+func (c *Client) InterfaceByName(name string) (*WifiInterface, error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil { return nil, fmt.Errorf("InterfaceByName: %w", err)}
+
+	return c.InterfaceById(iface.Index)
+}
+
+// SetChannel sets the wifi channel of a given interface
+func (c *Client) SetChannel(w *WifiInterface, channel int) error {
+	ch, ok := WifiChannel[channel]
+	if !ok { return fmt.Errorf("SetChannel: invalid channel provided: %v", channel) }
+
+	msg := newGenlMessage(unix.NL80211_CMD_SET_WIPHY)
+	ae := netlink.NewAttributeEncoder()
+	AppendInterfaceIndexAttribute(w.Index, ae)	
+	AppendWiphyFrequencyAttribute(ch, ae)
+
+	msg.Data = c.encodeAttributes(ae)
+	c.SendRequest(msg)
+	return c.err
+}
+
+// SetInterfaceType sets the interface type of the given interface
+func (c *Client) SetInterfaceType(w *WifiInterface, iftype InterfaceType) error {
+	msg := newGenlMessage(unix.NL80211_CMD_SET_INTERFACE)
+	ae := netlink.NewAttributeEncoder()
+	AppendInterfaceIndexAttribute(w.Index, ae)
+	AppendInterfaceTypeAttribute(int(iftype),  ae)
+	msg.Data = c.encodeAttributes(ae)
+	c.SendRequest(msg)
+	return c.err
+}
+
+// newGenlMessage returns a generic netlink message with the 
+// given nl80211 command set in the header.
+func newGenlMessage(cmd int) *genetlink.Message {
+	return &genetlink.Message {
+		Header : genetlink.Header{
+			Version: 1,
+			Command: uint8(cmd),
+		},
+	}
+}
+
+// encodeAttributes takes a *netlink.AttributeEncoder as an argument
+// and returns a []byte object representing the encoded data
+func (c *Client) encodeAttributes(ae *netlink.AttributeEncoder) []byte {
+	data, err := ae.Encode()
+	if err != nil { c.err = err; return nil}
+	return data
+}
+
+// Send sends a single generic netlink message
+func (c *Client) Send(msg *genetlink.Message, flags netlink.HeaderFlags) {
+	if c.err != nil { return }
+	_, c.err = c.c.Send(*msg, c.familyID, flags)
+}
+
+// SendRequest is a convenience function for passing netlink.Request to Client.Send
+func (c *Client) SendRequest(msg *genetlink.Message) {
+	c.Send(msg, netlink.Request)
+}
+
+// Recv returns one or more generic netlink message responses.
+func (c *Client) Recv() []genetlink.Message {
+	if c.err != nil { return nil }
+	msgs, _ , err := c.c.Receive()
+	if err != nil { c.err = err; return nil }
+	return msgs
+}
+
+// parseGetInterfaceResponse parses the responses to a NL80211_CMD_GET_INTERFACE request
+func (c *Client) parseGetInterfaceResponse(msgs []genetlink.Message) []*WifiInterface {
+	if c.err != nil { return nil }
+	wifis := make([]*WifiInterface, 0, len(msgs))
+	for _, m := range msgs {
+		attrs, err := netlink.UnmarshalAttributes(m.Data)
+		if err != nil { 
+			c.err = fmt.Errorf("parseGetInterfaceResponse: failed to unpack attributes: %v", err) 
+			return nil
+		}
+		wifi := &WifiInterface{}
+		for _, a := range attrs {
+			switch a.Type {
+			case unix.NL80211_ATTR_IFINDEX:
+				wifi.Index = int(nlenc.Uint32(a.Data))
+			case unix.NL80211_ATTR_IFNAME:
+				wifi.Name = nlenc.String(a.Data) 
+			case unix.NL80211_ATTR_MAC:
+				wifi.HardwareAddr = net.HardwareAddr(a.Data)
+			case unix.NL80211_ATTR_WIPHY:
+				wifi.Phy = int(nlenc.Uint32(a.Data))
+			case unix.NL80211_ATTR_IFTYPE:
+				wifi.Type = InterfaceType(nlenc.Uint32(a.Data)) 
+			case unix.NL80211_ATTR_WDEV:
+				wifi.Device = int(nlenc.Uint64(a.Data))
+			case unix.NL80211_ATTR_WIPHY_FREQ:
+				wifi.Frequency = int(nlenc.Uint32(a.Data))
+			}
+		}
+		wifis = append(wifis, wifi)
+	}
+	return wifis
 }
