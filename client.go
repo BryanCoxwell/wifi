@@ -19,11 +19,9 @@ import (
 type Client struct {
 	c             *genetlink.Conn
 	familyID      uint16
-	err 		  error 
 }
 
-// NewClient dials a generic netlink connection and verifies that nl80211
-// is available for use by this package.
+// NewClient opens a generic netlink connection and sets the nl80211 family ID
 func NewClient() (*Client, error) {
 	c, err := genetlink.Dial(nil)
 	if err != nil { return nil, fmt.Errorf("failed to open generic netlink connection: %v", err )}
@@ -41,27 +39,40 @@ func (c *Client) Close() error { return c.c.Close() }
 
 // DumpInterfaces returns a list of all wifi interfaces present on the system.
 func (c *Client) DumpInterfaces() ([]*WifiInterface, error) {
-	msg := newGenlMessage(unix.NL80211_CMD_GET_INTERFACE)
-	ae := netlink.NewAttributeEncoder()
-	flags := netlink.Request | netlink.Dump
-	msg.Data = c.encodeAttributes(ae)
-	c.Send(msg, flags)
-	response := c.Recv()
-	wifis := c.parseGetInterfaceResponse(response)
-	return wifis, c.err
+	msg, err := NewNl80211Message(unix.NL80211_CMD_GET_INTERFACE, nil)
+	if err != nil { return nil, fmt.Errorf("DumpInterfaces: %v", err)}
+	
+	request := &Nl80211Request{
+		RequestMessage: msg,
+		Flags: netlink.Request | netlink.Dump,
+	}
+
+	response, err := request.Response(c)
+	if err != nil { return nil, fmt.Errorf("DumpInterfaces: %v", err)}
+
+	return c.parseGetInterfaceResponse(response)
 }
 
 // InterfaceById returns the interface that matches the given interface index.
 func (c *Client) InterfaceById(ifindex int) (*WifiInterface, error) {
-	msg := newGenlMessage(unix.NL80211_CMD_GET_INTERFACE)
-	ae := netlink.NewAttributeEncoder()
-	AppendInterfaceIndexAttribute(ifindex, ae)
-	msg.Data = c.encodeAttributes(ae)
-	c.SendRequest(msg)
-	response := c.Recv()
-	wifis := c.parseGetInterfaceResponse(response)
-	if c.err != nil { return nil, c.err }
-	return wifis[0], c.err
+	attrs := []AttributeEncoder{
+		InterfaceIndexAttribute(ifindex),
+	}
+	msg, err := NewNl80211Message(unix.NL80211_CMD_GET_INTERFACE, attrs)
+	if err != nil { return nil, fmt.Errorf("InterfaceById: %v", err)}
+
+	request := &Nl80211Request{
+		RequestMessage: msg,
+		Flags: netlink.Request,
+	}
+	
+	response, err := request.Response(c)
+	if err != nil { return nil, fmt.Errorf("InterfaceById: %v", err)}
+
+	wifis, err := c.parseGetInterfaceResponse(response)
+	if err != nil { return nil, fmt.Errorf("InterfaceById: %v", err)}
+
+	return wifis[0], nil
 }
 
 // InterfaceByName takes an interface name and returns a pointer to the 
@@ -78,74 +89,47 @@ func (c *Client) SetChannel(w *WifiInterface, channel int) error {
 	ch, ok := WifiChannel[channel]
 	if !ok { return fmt.Errorf("SetChannel: invalid channel provided: %v", channel) }
 
-	msg := newGenlMessage(unix.NL80211_CMD_SET_WIPHY)
-	ae := netlink.NewAttributeEncoder()
-	AppendInterfaceIndexAttribute(w.Index, ae)	
-	AppendWiphyFrequencyAttribute(ch, ae)
+	attrs := []AttributeEncoder{
+		InterfaceIndexAttribute(w.Index),
+		WiphyFrequencyAttribute(ch),
+	}
 
-	msg.Data = c.encodeAttributes(ae)
-	c.SendRequest(msg)
-	return c.err
+	msg, err := NewNl80211Message(unix.NL80211_CMD_SET_WIPHY, attrs)
+	if err != nil {return fmt.Errorf("SetChannel: %v", err)}
+
+	request := &Nl80211Request{
+		RequestMessage: msg,
+		Flags: netlink.Request | netlink.Acknowledge,
+	}
+
+	_, err = request.Response(c)
+	return err
 }
 
 // SetInterfaceType sets the interface type of the given interface
 func (c *Client) SetInterfaceType(w *WifiInterface, iftype InterfaceType) error {
-	msg := newGenlMessage(unix.NL80211_CMD_SET_INTERFACE)
-	ae := netlink.NewAttributeEncoder()
-	AppendInterfaceIndexAttribute(w.Index, ae)
-	AppendInterfaceTypeAttribute(int(iftype),  ae)
-	msg.Data = c.encodeAttributes(ae)
-	c.SendRequest(msg)
-	return c.err
-}
-
-// newGenlMessage returns a generic netlink message with the 
-// given nl80211 command set in the header.
-func newGenlMessage(cmd int) *genetlink.Message {
-	return &genetlink.Message {
-		Header : genetlink.Header{
-			Version: 1,
-			Command: uint8(cmd),
-		},
+	attrs := []AttributeEncoder{
+		InterfaceIndexAttribute(w.Index),
+		InterfaceTypeAttribute(int(iftype)),
 	}
-}
+	msg, err := NewNl80211Message(unix.NL80211_CMD_SET_INTERFACE, attrs)
+	if err != nil { return fmt.Errorf("SetInterfaceType: %v", err)}
 
-// encodeAttributes takes a *netlink.AttributeEncoder as an argument
-// and returns a []byte object representing the encoded data
-func (c *Client) encodeAttributes(ae *netlink.AttributeEncoder) []byte {
-	data, err := ae.Encode()
-	if err != nil { c.err = err; return nil}
-	return data
-}
-
-// Send sends a single generic netlink message
-func (c *Client) Send(msg *genetlink.Message, flags netlink.HeaderFlags) {
-	if c.err != nil { return }
-	_, c.err = c.c.Send(*msg, c.familyID, flags)
-}
-
-// SendRequest is a convenience function for passing netlink.Request to Client.Send
-func (c *Client) SendRequest(msg *genetlink.Message) {
-	c.Send(msg, netlink.Request)
-}
-
-// Recv returns one or more generic netlink message responses.
-func (c *Client) Recv() []genetlink.Message {
-	if c.err != nil { return nil }
-	msgs, _ , err := c.c.Receive()
-	if err != nil { c.err = err; return nil }
-	return msgs
+	request := &Nl80211Request{
+		RequestMessage: msg,
+		Flags: netlink.Request | netlink.Acknowledge,
+	}
+	_, err = request.Response(c)
+	return err
 }
 
 // parseGetInterfaceResponse parses the responses to a NL80211_CMD_GET_INTERFACE request
-func (c *Client) parseGetInterfaceResponse(msgs []genetlink.Message) []*WifiInterface {
-	if c.err != nil { return nil }
+func (c *Client) parseGetInterfaceResponse(msgs []genetlink.Message) ([]*WifiInterface, error) {
 	wifis := make([]*WifiInterface, 0, len(msgs))
 	for _, m := range msgs {
 		attrs, err := netlink.UnmarshalAttributes(m.Data)
 		if err != nil { 
-			c.err = fmt.Errorf("parseGetInterfaceResponse: failed to unpack attributes: %v", err) 
-			return nil
+			return nil, fmt.Errorf("parseGetInterfaceResponse: failed to unpack attributes: %v", err) 
 		}
 		wifi := &WifiInterface{}
 		for _, a := range attrs {
@@ -168,5 +152,52 @@ func (c *Client) parseGetInterfaceResponse(msgs []genetlink.Message) []*WifiInte
 		}
 		wifis = append(wifis, wifi)
 	}
-	return wifis
+	return wifis, nil
+}
+
+// NewNl80211Message takes a command and a list of attributes and returns 
+// a generic netlink message containing the encoded attributes. 
+func NewNl80211Message(cmd int, lst []AttributeEncoder) (*genetlink.Message, error) {
+	msg := &genetlink.Message {
+		Header: genetlink.Header{
+			Version: 1,
+			Command: uint8(cmd),
+		},
+	}
+
+	ae := netlink.NewAttributeEncoder()
+	for _, a := range lst {
+		a.EncodeAttribute(ae)
+	}
+	data, err := ae.Encode()
+	if err != nil { return nil, fmt.Errorf("NewNl80211Message") }
+
+	msg.Data = data
+	return msg, nil
+}
+
+type Nl80211Request struct {
+	RequestMessage *genetlink.Message
+	Flags netlink.HeaderFlags
+	err error
+}
+
+// Response sends a Netlink request and returns a list of generic
+// netlink messages (the response)
+func (r Nl80211Request) Response(c *Client) ([]genetlink.Message, error){
+	if r.err != nil { return nil, r.err }
+
+	_, err := c.c.Send(*r.RequestMessage, c.familyID, r.Flags)
+	if err != nil { return nil, fmt.Errorf("Response: %v", err) }
+
+	msgs, nlmsgs, err := c.c.Receive()
+	if err != nil { return nil, fmt.Errorf("Response: %v", err) }
+
+	// At this point, since err is nil we should be able to assume
+	// any message of type Error is an ACK response and drop it.
+	if nlmsgs[0].Header.Type == netlink.Error {
+		return msgs[1:], nil
+	}
+
+	return msgs, nil
 }
