@@ -6,13 +6,13 @@ import (
 )
 
 type WifiInterface struct {
-	Index int
+	Index uint32
 	Name string
 	HardwareAddr net.HardwareAddr
-	Phy int
+	Phy uint32 
 	Type InterfaceType
-	Device int
-	Frequency int
+	Device uint64
+	Frequency uint32
 }
 
 func (c *WifiInterface) String() string {
@@ -70,7 +70,7 @@ func (t InterfaceType) String() string {
 	}
 }
 
-var WifiChannel = map[int]int {
+var WifiChannel = map[int]uint32 {
 	1: 2412,
     2: 2417,
     3: 2422,

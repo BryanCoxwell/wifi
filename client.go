@@ -13,9 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A client is the Linux implementation of osClient, which makes use of
-// netlink, generic netlink, and nl80211 to provide access to WiFi device
-// actions and statistics.
+// Client objects handle communication with the nl80211 kernel interface.
 type Client struct {
 	c             *genetlink.Conn
 	familyID      uint16
@@ -35,7 +33,19 @@ func NewClient() (*Client, error) {
 }
 
 // Close closes the client's generic netlink connection.
-func (c *Client) Close() error { return c.c.Close() }
+func (c *Client) Close() error {
+	return c.c.Close() 
+}
+
+// Reset closes and reopens the Client's netlink connection
+func (c *Client) Reset() error {
+	err := c.Close()
+	if err != nil { return fmt.Errorf("Reset: %v", err) }
+	newConn, err := genetlink.Dial(nil)
+	if err != nil { return fmt.Errorf("Reset: %v", err) }
+	c.c = newConn
+	return nil
+}
 
 // DumpInterfaces returns a list of all wifi interfaces present on the system.
 func (c *Client) DumpInterfaces() ([]*WifiInterface, error) {
@@ -54,7 +64,7 @@ func (c *Client) DumpInterfaces() ([]*WifiInterface, error) {
 }
 
 // InterfaceById returns the interface that matches the given interface index.
-func (c *Client) InterfaceById(ifindex int) (*WifiInterface, error) {
+func (c *Client) InterfaceById(ifindex uint32) (*WifiInterface, error) {
 	attrs := []AttributeEncoder{
 		InterfaceIndexAttribute(ifindex),
 	}
@@ -72,6 +82,9 @@ func (c *Client) InterfaceById(ifindex int) (*WifiInterface, error) {
 	wifis, err := c.parseGetInterfaceResponse(response)
 	if err != nil { return nil, fmt.Errorf("InterfaceById: %v", err)}
 
+	if len(wifis) == 0 { 
+		return nil, fmt.Errorf("InterfaceById: found no interfaces with ID=%d", ifindex)
+	}
 	return wifis[0], nil
 }
 
@@ -80,8 +93,7 @@ func (c *Client) InterfaceById(ifindex int) (*WifiInterface, error) {
 func (c *Client) InterfaceByName(name string) (*WifiInterface, error) {
 	iface, err := net.InterfaceByName(name)
 	if err != nil { return nil, fmt.Errorf("InterfaceByName: %w", err)}
-
-	return c.InterfaceById(iface.Index)
+	return c.InterfaceById(uint32(iface.Index))
 }
 
 // SetChannel sets the wifi channel of a given interface
@@ -110,10 +122,44 @@ func (c *Client) SetChannel(w *WifiInterface, channel int) error {
 func (c *Client) SetInterfaceType(w *WifiInterface, iftype InterfaceType) error {
 	attrs := []AttributeEncoder{
 		InterfaceIndexAttribute(w.Index),
-		InterfaceTypeAttribute(int(iftype)),
+		InterfaceTypeAttribute(uint32(iftype)),
 	}
 	msg, err := NewNl80211Message(unix.NL80211_CMD_SET_INTERFACE, attrs)
 	if err != nil { return fmt.Errorf("SetInterfaceType: %v", err)}
+
+	request := &Nl80211Request{
+		RequestMessage: msg,
+		Flags: netlink.Request | netlink.Acknowledge,
+	}
+	_, err = request.Response(c)
+	return err
+}
+
+// NewInterface creates a new wifi interface using the underlying PHY of the provided interface
+func (c *Client) NewInterface(w *WifiInterface, ifname string, iftype InterfaceType) error {
+	attrs := []AttributeEncoder{
+		InterfaceTypeAttribute(uint32(InterfaceTypeMonitor)),
+		InterfaceNameAttribute(ifname),
+		WiphyAttribute(w.Phy),
+	}
+	msg, err := NewNl80211Message(unix.NL80211_CMD_NEW_INTERFACE, attrs)
+	if err != nil { return fmt.Errorf("NewInterface: %v", err)}
+
+	request := &Nl80211Request{
+		RequestMessage: msg,
+		Flags: netlink.Request | netlink.Acknowledge,
+	}
+	_, err = request.Response(c)
+	return err
+}
+
+// DeleteInterface deletes a wireless interface
+func (c *Client) DeleteInterface(w *WifiInterface) error {
+	attrs := []AttributeEncoder{
+		InterfaceIndexAttribute(w.Index),
+	}
+	msg, err := NewNl80211Message(unix.NL80211_CMD_DEL_INTERFACE, attrs)
+	if err != nil { return fmt.Errorf("DeleteInterface: %v", err)}
 
 	request := &Nl80211Request{
 		RequestMessage: msg,
@@ -135,19 +181,19 @@ func (c *Client) parseGetInterfaceResponse(msgs []genetlink.Message) ([]*WifiInt
 		for _, a := range attrs {
 			switch a.Type {
 			case unix.NL80211_ATTR_IFINDEX:
-				wifi.Index = int(nlenc.Uint32(a.Data))
+				wifi.Index = nlenc.Uint32(a.Data)
 			case unix.NL80211_ATTR_IFNAME:
 				wifi.Name = nlenc.String(a.Data) 
 			case unix.NL80211_ATTR_MAC:
 				wifi.HardwareAddr = net.HardwareAddr(a.Data)
 			case unix.NL80211_ATTR_WIPHY:
-				wifi.Phy = int(nlenc.Uint32(a.Data))
+				wifi.Phy = nlenc.Uint32(a.Data)
 			case unix.NL80211_ATTR_IFTYPE:
 				wifi.Type = InterfaceType(nlenc.Uint32(a.Data)) 
 			case unix.NL80211_ATTR_WDEV:
-				wifi.Device = int(nlenc.Uint64(a.Data))
+				wifi.Device = nlenc.Uint64(a.Data)
 			case unix.NL80211_ATTR_WIPHY_FREQ:
-				wifi.Frequency = int(nlenc.Uint32(a.Data))
+				wifi.Frequency = nlenc.Uint32(a.Data)
 			}
 		}
 		wifis = append(wifis, wifi)
@@ -164,7 +210,6 @@ func NewNl80211Message(cmd int, lst []AttributeEncoder) (*genetlink.Message, err
 			Command: uint8(cmd),
 		},
 	}
-
 	ae := netlink.NewAttributeEncoder()
 	for _, a := range lst {
 		a.EncodeAttribute(ae)
