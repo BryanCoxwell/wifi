@@ -1,4 +1,4 @@
-module github.com/BryanCoxwell/wifi
+module github.com/bryancoxwell/wifi
 
 go 1.19
 
