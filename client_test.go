@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/BryanCoxwell/wifi"
+	"github.com/bryancoxwell/wifi"
 	"github.com/mdlayher/genetlink"
 	"golang.org/x/sys/unix"
 )
